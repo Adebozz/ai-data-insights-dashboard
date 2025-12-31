@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   ResponsiveContainer,
   BarChart,
@@ -10,26 +10,64 @@ import {
   Tooltip,
 } from "recharts";
 
+type SummaryStats = {
+  count: number;
+  mean: number;
+  std: number;
+  min: number;
+  p25: number;
+  median: number;
+  p75: number;
+  max: number;
+};
+
 type ApiResult = {
   fileName: string;
   shape: { rows: number; cols: number };
   dtypes: Record<string, string>;
   missing: { total: number; byColumn: Record<string, number> };
   numericColumns: string[];
-  summaryStats: Record<
-    string,
-    { count: number; mean: number; std: number; min: number; p25: number; median: number; p75: number; max: number }
-  >;
+  summaryStats: Record<string, SummaryStats>;
   correlation: null | { columns: string[]; matrix: number[][] };
+  samples: Record<string, number[]>; // ✅ from backend
   preview: { columns: string[]; rows: Record<string, any>[] };
   error?: string;
 };
+
+function buildHistogram(values: number[], bins = 12) {
+  const clean = values.filter((v) => Number.isFinite(v));
+  if (clean.length === 0) return [];
+
+  const min = Math.min(...clean);
+  const max = Math.max(...clean);
+
+  if (min === max) return [{ bin: `${min.toFixed(2)}`, count: clean.length }];
+
+  const width = (max - min) / bins;
+  const counts = new Array(bins).fill(0);
+
+  for (const v of clean) {
+    const idx = Math.min(bins - 1, Math.floor((v - min) / width));
+    counts[idx] += 1;
+  }
+
+  return counts.map((count, i) => {
+    const start = min + i * width;
+    const end = start + width;
+    return { bin: `${start.toFixed(1)}–${end.toFixed(1)}`, count };
+  });
+}
 
 export default function Home() {
   const [file, setFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState<ApiResult | null>(null);
   const [err, setErr] = useState<string | null>(null);
+
+  const [selectedCol, setSelectedCol] = useState<string>("");
+
+  const fileRef = useRef<HTMLInputElement | null>(null);
+  const apiBase = process.env.NEXT_PUBLIC_API_BASE;
 
   const missingChart = useMemo(() => {
     if (!data) return [];
@@ -39,7 +77,19 @@ export default function Home() {
       .slice(0, 12);
   }, [data]);
 
-  const apiBase = process.env.NEXT_PUBLIC_API_BASE;
+  const histogramData = useMemo(() => {
+    if (!data || !selectedCol) return [];
+    const vals = data.samples?.[selectedCol] ?? [];
+    return buildHistogram(vals, 12);
+  }, [data, selectedCol]);
+
+  useEffect(() => {
+    if (data?.numericColumns?.length) {
+      setSelectedCol((prev) => prev || data.numericColumns[0]);
+    } else {
+      setSelectedCol("");
+    }
+  }, [data]);
 
   async function analyze() {
     if (!file) return;
@@ -55,6 +105,7 @@ export default function Home() {
         method: "POST",
         body: form,
       });
+
       const json = (await res.json()) as ApiResult;
 
       if (!res.ok || json.error) {
@@ -77,14 +128,30 @@ export default function Home() {
           Upload a CSV → get instant insights → visualize it.
         </p>
 
+        {/* Upload */}
         <div className="mt-8 rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6">
           <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-            <input
-              type="file"
-              accept=".csv"
-              onChange={(e) => setFile(e.target.files?.[0] || null)}
-              className="block w-full text-sm text-zinc-200 file:mr-4 file:rounded-xl file:border-0 file:bg-zinc-800 file:px-4 file:py-2 file:text-zinc-100 hover:file:bg-zinc-700"
-            />
+            <div className="flex flex-col gap-2 md:flex-row md:items-center">
+              <button
+                onClick={() => fileRef.current?.click()}
+                className="w-fit rounded-xl bg-zinc-800 px-4 py-2 text-sm font-semibold text-zinc-100 hover:bg-zinc-700"
+              >
+                Choose CSV
+              </button>
+
+              <span className="text-sm text-zinc-300">
+                {file ? file.name : "No file selected"}
+              </span>
+
+              <input
+                ref={fileRef}
+                type="file"
+                accept=".csv"
+                onChange={(e) => setFile(e.target.files?.[0] || null)}
+                className="hidden"
+              />
+            </div>
+
             <button
               onClick={analyze}
               disabled={!file || loading}
@@ -105,11 +172,23 @@ export default function Home() {
           <div className="mt-8 grid gap-6 md:grid-cols-3">
             <Card title="Dataset">
               <div className="text-sm text-zinc-200">
-                <div><span className="text-zinc-400">File:</span> {data.fileName}</div>
-                <div><span className="text-zinc-400">Rows:</span> {data.shape.rows}</div>
-                <div><span className="text-zinc-400">Cols:</span> {data.shape.cols}</div>
-                <div><span className="text-zinc-400">Missing:</span> {data.missing.total}</div>
-                <div><span className="text-zinc-400">Numeric cols:</span> {data.numericColumns.length}</div>
+                <div>
+                  <span className="text-zinc-400">File:</span> {data.fileName}
+                </div>
+                <div>
+                  <span className="text-zinc-400">Rows:</span> {data.shape.rows}
+                </div>
+                <div>
+                  <span className="text-zinc-400">Cols:</span> {data.shape.cols}
+                </div>
+                <div>
+                  <span className="text-zinc-400">Missing:</span>{" "}
+                  {data.missing.total}
+                </div>
+                <div>
+                  <span className="text-zinc-400">Numeric cols:</span>{" "}
+                  {data.numericColumns.length}
+                </div>
               </div>
             </Card>
 
@@ -120,21 +199,64 @@ export default function Home() {
                     <XAxis dataKey="name" hide />
                     <YAxis />
                     <Tooltip />
-                    <Bar dataKey="missing" />
+                    <Bar dataKey="missing" fill="#3b82f6" />
                   </BarChart>
                 </ResponsiveContainer>
               </div>
               <p className="mt-2 text-xs text-zinc-400">
-                Tip: columns with lots of missing values usually need cleaning or dropping.
+                Tip: columns with lots of missing values usually need cleaning or
+                dropping.
               </p>
             </Card>
 
-            <Card title="Quick Stats (first numeric column)">
-              {data.numericColumns[0] ? (
-                <StatsTable
-                  col={data.numericColumns[0]}
-                  stats={data.summaryStats[data.numericColumns[0]]}
-                />
+            <Card title="Quick Stats + Distribution">
+              {data.numericColumns.length ? (
+                <>
+                  <label className="text-sm text-zinc-300">
+                    Choose numeric column
+                  </label>
+                  <select
+                    value={selectedCol}
+                    onChange={(e) => setSelectedCol(e.target.value)}
+                    className="mt-2 w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100"
+                  >
+                    {data.numericColumns.map((c) => (
+                      <option key={c} value={c}>
+                        {c}
+                      </option>
+                    ))}
+                  </select>
+
+                  <div className="mt-4">
+                    {selectedCol && data.summaryStats[selectedCol] ? (
+                      <StatsTable
+                        col={selectedCol}
+                        stats={data.summaryStats[selectedCol]}
+                      />
+                    ) : (
+                      <p className="text-sm text-zinc-300">
+                        No stats for selected column.
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="mt-4">
+                    <p className="text-sm text-zinc-300">Distribution</p>
+                    <div className="mt-2 h-40 w-full">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <BarChart data={histogramData}>
+                          <XAxis dataKey="bin" hide />
+                          <YAxis />
+                          <Tooltip />
+                          <Bar dataKey="count" fill="#22c55e" />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </div>
+                    <p className="mt-2 text-xs text-zinc-400">
+                      Histogram is built from up to 2000 sample values.
+                    </p>
+                  </div>
+                </>
               ) : (
                 <p className="text-sm text-zinc-300">No numeric columns found.</p>
               )}
@@ -147,7 +269,10 @@ export default function Home() {
                     <thead className="sticky top-0 bg-zinc-950/40">
                       <tr>
                         {data.preview.columns.map((c) => (
-                          <th key={c} className="whitespace-nowrap border-b border-zinc-800 px-3 py-2 text-zinc-300">
+                          <th
+                            key={c}
+                            className="whitespace-nowrap border-b border-zinc-800 px-3 py-2 text-zinc-300"
+                          >
                             {c}
                           </th>
                         ))}
@@ -157,7 +282,10 @@ export default function Home() {
                       {data.preview.rows.map((r, i) => (
                         <tr key={i} className="border-b border-zinc-900">
                           {data.preview.columns.map((c) => (
-                            <td key={c} className="whitespace-nowrap px-3 py-2 text-zinc-100">
+                            <td
+                              key={c}
+                              className="whitespace-nowrap px-3 py-2 text-zinc-100"
+                            >
                               {String(r[c] ?? "")}
                             </td>
                           ))}
@@ -184,13 +312,7 @@ function Card({ title, children }: { title: string; children: React.ReactNode })
   );
 }
 
-function StatsTable({
-  col,
-  stats,
-}: {
-  col: string;
-  stats: { count: number; mean: number; std: number; min: number; p25: number; median: number; p75: number; max: number };
-}) {
+function StatsTable({ col, stats }: { col: string; stats: SummaryStats }) {
   const rows: [string, number][] = [
     ["count", stats.count],
     ["mean", stats.mean],
@@ -213,7 +335,9 @@ function StatsTable({
             {rows.map(([k, v]) => (
               <tr key={k} className="border-b border-zinc-800 last:border-b-0">
                 <td className="px-3 py-2 text-zinc-400">{k}</td>
-                <td className="px-3 py-2 text-zinc-100">{Number.isFinite(v) ? v.toFixed(4) : String(v)}</td>
+                <td className="px-3 py-2 text-zinc-100">
+                  {Number.isFinite(v) ? v.toFixed(4) : String(v)}
+                </td>
               </tr>
             ))}
           </tbody>
